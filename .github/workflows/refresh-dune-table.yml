@@ -1,0 +1,40 @@
+name: Refresh Dune prediction token table
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: refresh-dune-prediction-token-table
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
+      DUNE_NAMESPACE: ${{ secrets.DUNE_NAMESPACE }}
+      AI_API_KEY: ${{ secrets.AI_API_KEY }}
+      AI_API_BASE_URL: ${{ vars.AI_API_BASE_URL || 'https://openrouter.ai/api/v1' }}
+      AI_MODEL: ${{ vars.AI_MODEL || 'meta-llama/llama-3.1-8b-instruct:free' }}
+      DUNE_OUTPUT_TABLE: ${{ vars.DUNE_OUTPUT_TABLE || 'categorized_prediction_markets' }}
+      DUNE_PERFORMANCE: ${{ vars.DUNE_PERFORMANCE || 'medium' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Refresh Dune table
+        run: python scripts/refresh_dune_prediction_tokens.py
