@@ -13,16 +13,7 @@ from requests import Response, Session
 
 
 DUNE_API_BASE_URL = "https://api.dune.com/api/v1"
-SOURCE_SQL = """
-SELECT
-    token_mint_address,
-    symbol,
-    name,
-    decimals
-FROM tokens_solana.fungible
-WHERE token_uri IS NOT NULL
-  AND LOWER(token_uri) LIKE '%m.world.xyz%'
-"""
+SOURCE_COLUMNS = ["token_mint_address", "symbol", "name", "decimals"]
 
 CATEGORIES = [
     "Politics",
@@ -40,6 +31,46 @@ CATEGORIES = [
 
 class ConfigError(RuntimeError):
     pass
+
+
+def quote_identifier(identifier: str) -> str:
+    if not identifier:
+        raise ConfigError("Dune SQL identifier cannot be empty")
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def uploaded_table_sql_name(namespace: str, table_name: str) -> str:
+    return f"dune.{quote_identifier(namespace)}.{quote_identifier(table_name)}"
+
+
+def build_source_sql(*, incremental: bool, namespace: str, table_name: str) -> str:
+    filters = [
+        "source.token_uri IS NOT NULL",
+        "LOWER(source.token_uri) LIKE '%m.world.xyz%'",
+    ]
+    if incremental:
+        destination_table = uploaded_table_sql_name(namespace, table_name)
+        filters.extend(
+            [
+                "source.created_at >= NOW() - INTERVAL '24' HOUR",
+                f"""
+NOT EXISTS (
+    SELECT 1
+    FROM {destination_table} existing
+    WHERE existing.token_mint_address = source.token_mint_address
+)""".strip(),
+            ]
+        )
+
+    return f"""
+SELECT
+    source.token_mint_address,
+    source.symbol,
+    source.name,
+    source.decimals
+FROM tokens_solana.fungible source
+WHERE {' AND '.join(filters)}
+"""
 
 
 def env_required(name: str) -> str:
@@ -84,13 +115,13 @@ def raise_for_api_error(response: Response, context: str) -> None:
     raise RuntimeError(f"{context} failed: HTTP {response.status_code}: {response.text[:1000]}")
 
 
-def execute_dune_sql(session: Session, api_key: str, performance: str) -> str:
+def execute_dune_sql(session: Session, api_key: str, performance: str, sql: str) -> str:
     response = request_with_retry(
         session,
         "POST",
         f"{DUNE_API_BASE_URL}/sql/execute",
         headers={"X-DUNE-API-KEY": api_key, "Content-Type": "application/json"},
-        json={"sql": SOURCE_SQL, "performance": performance},
+        json={"sql": sql, "performance": performance},
     )
     raise_for_api_error(response, "Dune SQL execution")
     execution_id = response.json().get("execution_id")
@@ -128,7 +159,13 @@ def wait_for_dune_execution(
     raise TimeoutError(f"Dune execution {execution_id} did not finish within {max_wait_seconds}s")
 
 
-def fetch_dune_results(session: Session, api_key: str, execution_id: str) -> pd.DataFrame:
+def fetch_dune_results(
+    session: Session,
+    api_key: str,
+    execution_id: str,
+    *,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     offset = 0
     limit = int(os.getenv("DUNE_RESULT_PAGE_SIZE", "1000"))
@@ -149,7 +186,20 @@ def fetch_dune_results(session: Session, api_key: str, execution_id: str) -> pd.
             break
         offset = int(next_offset)
 
-    return pd.DataFrame(rows, columns=["token_mint_address", "symbol", "name", "decimals"])
+    return pd.DataFrame(rows, columns=columns)
+
+
+def execute_sql_to_dataframe(
+    session: Session,
+    api_key: str,
+    performance: str,
+    sql: str,
+    *,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
+    execution_id = execute_dune_sql(session, api_key, performance, sql)
+    wait_for_dune_execution(session, api_key, execution_id)
+    return fetch_dune_results(session, api_key, execution_id, columns=columns)
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -163,7 +213,7 @@ def extract_json_object(text: str) -> dict[str, Any]:
         return json.loads(text[start : end + 1])
 
 
-def ai_categorize_batch(
+def categorize_batch(
     session: Session,
     names: list[str],
     *,
@@ -198,7 +248,7 @@ def ai_categorize_batch(
             ],
         },
     )
-    raise_for_api_error(response, "AI categorization")
+    raise_for_api_error(response, "Categorization")
     content = response.json()["choices"][0]["message"]["content"]
     parsed = extract_json_object(content)
     raw_categories = parsed.get("categories", parsed)
@@ -211,10 +261,10 @@ def ai_categorize_batch(
 
 
 def categorize_names(session: Session, names: list[str]) -> dict[str, str]:
-    api_key = env_required("AI_API_KEY")
-    api_base_url = os.getenv("AI_API_BASE_URL", "https://openrouter.ai/api/v1")
-    model = os.getenv("AI_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
-    batch_size = int(os.getenv("AI_BATCH_SIZE", "50"))
+    api_key = env_required("CLASSIFIER_API_KEY")
+    api_base_url = env_required("CLASSIFIER_API_BASE_URL")
+    model = env_required("CLASSIFIER_MODEL")
+    batch_size = int(os.getenv("CLASSIFIER_BATCH_SIZE", "50"))
 
     results: dict[str, str] = {}
     for index in range(0, len(names), batch_size):
@@ -222,7 +272,7 @@ def categorize_names(session: Session, names: list[str]) -> dict[str, str]:
         print(f"Categorizing names {index + 1}-{index + len(batch)} of {len(names)}")
         try:
             results.update(
-                ai_categorize_batch(
+                categorize_batch(
                     session,
                     batch,
                     api_key=api_key,
@@ -231,18 +281,17 @@ def categorize_names(session: Session, names: list[str]) -> dict[str, str]:
                 )
             )
         except Exception as exc:
-            print(f"AI categorization failed for batch; using Other. Error: {exc}", file=sys.stderr)
+            print(f"Categorization failed for batch; using Other. Error: {exc}", file=sys.stderr)
             results.update({name: "Other" for name in batch})
     return results
 
 
 def prepare_final_dataset(df: pd.DataFrame, categories: dict[str, str]) -> pd.DataFrame:
-    required_columns = ["token_mint_address", "symbol", "name", "decimals"]
-    missing = [column for column in required_columns if column not in df.columns]
+    missing = [column for column in SOURCE_COLUMNS if column not in df.columns]
     if missing:
         raise RuntimeError(f"Missing expected Dune result columns: {missing}")
 
-    final = df[required_columns].copy()
+    final = df[SOURCE_COLUMNS].copy()
     final = final.drop_duplicates(subset=["token_mint_address"], keep="first")
     final["category"] = final["name"].fillna("").astype(str).map(categories).fillna("Other")
     final["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -253,7 +302,7 @@ def create_table_if_needed(session: Session, api_key: str, namespace: str, table
     payload = {
         "namespace": namespace,
         "table_name": table_name,
-        "description": "Daily refreshed m.world.xyz Solana fungible tokens categorized by prediction-market theme.",
+        "description": "Daily m.world.xyz Solana fungible tokens categorized by prediction-market theme.",
         "is_private": os.getenv("DUNE_TABLE_PRIVATE", "false").lower() == "true",
         "schema": [
             {"name": "token_mint_address", "type": "varchar", "nullable": False},
@@ -280,14 +329,49 @@ def create_table_if_needed(session: Session, api_key: str, namespace: str, table
     raise_for_api_error(response, "Dune table create")
 
 
-def clear_table(session: Session, api_key: str, namespace: str, table_name: str) -> None:
-    response = request_with_retry(
-        session,
-        "POST",
-        f"{DUNE_API_BASE_URL}/uploads/{namespace}/{table_name}/clear",
-        headers={"X-DUNE-API-KEY": api_key},
+def list_uploaded_tables(session: Session, api_key: str) -> list[dict[str, Any]]:
+    tables: list[dict[str, Any]] = []
+    offset = 0
+    limit = 10000
+    while True:
+        response = request_with_retry(
+            session,
+            "GET",
+            f"{DUNE_API_BASE_URL}/uploads",
+            headers={"X-DUNE-API-KEY": api_key},
+            params={"limit": limit, "offset": offset},
+            timeout=30,
+        )
+        raise_for_api_error(response, "Dune table list")
+        payload = response.json()
+        tables.extend(payload.get("tables", []))
+        next_offset = payload.get("next_offset")
+        if next_offset is None:
+            break
+        offset = int(next_offset)
+    return tables
+
+
+def table_exists(session: Session, api_key: str, namespace: str, table_name: str) -> bool:
+    full_name = f"dune.{namespace}.{table_name}".lower()
+    return any(
+        str(table.get("full_name", "")).lower() == full_name and table.get("purged_at") is None
+        for table in list_uploaded_tables(session, api_key)
     )
-    raise_for_api_error(response, "Dune table clear")
+
+
+def get_table_row_count(
+    session: Session,
+    api_key: str,
+    performance: str,
+    namespace: str,
+    table_name: str,
+) -> int:
+    sql = f"SELECT COUNT(*) AS row_count FROM {uploaded_table_sql_name(namespace, table_name)}"
+    df = execute_sql_to_dataframe(session, api_key, performance, sql, columns=["row_count"])
+    if df.empty:
+        return 0
+    return int(df.iloc[0]["row_count"])
 
 
 def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
@@ -316,10 +400,32 @@ def main() -> None:
     performance = os.getenv("DUNE_PERFORMANCE", "medium")
 
     with requests.Session() as session:
-        execution_id = execute_dune_sql(session, dune_api_key, performance)
-        wait_for_dune_execution(session, dune_api_key, execution_id)
-        source_df = fetch_dune_results(session, dune_api_key, execution_id)
+        exists_before_run = table_exists(session, dune_api_key, namespace, table_name)
+        create_table_if_needed(session, dune_api_key, namespace, table_name)
+        existing_rows = 0 if not exists_before_run else get_table_row_count(
+            session,
+            dune_api_key,
+            performance,
+            namespace,
+            table_name,
+        )
+        incremental = existing_rows > 0
+        mode = "incremental last-24-hours append" if incremental else "initial full seed"
+        print(f"Running in {mode} mode. Existing rows: {existing_rows}")
+
+        source_sql = build_source_sql(incremental=incremental, namespace=namespace, table_name=table_name)
+        source_df = execute_sql_to_dataframe(
+            session,
+            dune_api_key,
+            performance,
+            source_sql,
+            columns=SOURCE_COLUMNS,
+        )
         print(f"Fetched {len(source_df)} source rows")
+
+        if source_df.empty:
+            print("No new tokens to insert.")
+            return
 
         unique_names = sorted(source_df["name"].dropna().astype(str).unique())
         category_map = categorize_names(session, unique_names)
@@ -327,10 +433,8 @@ def main() -> None:
         print("Category counts:")
         print(final_df["category"].value_counts().to_string())
 
-        create_table_if_needed(session, dune_api_key, namespace, table_name)
-        clear_table(session, dune_api_key, namespace, table_name)
         insert_table(session, dune_api_key, namespace, table_name, final_df)
-        print(f"Refresh complete: {namespace}.{table_name} ({len(final_df)} rows)")
+        print(f"Refresh complete: {namespace}.{table_name} ({len(final_df)} inserted rows)")
 
 
 if __name__ == "__main__":
