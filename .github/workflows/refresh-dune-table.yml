@@ -17,9 +17,9 @@ jobs:
     env:
       DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
       DUNE_NAMESPACE: ${{ secrets.DUNE_NAMESPACE }}
-      CLASSIFIER_API_KEY: ${{ secrets.CLASSIFIER_API_KEY }}
-      CLASSIFIER_API_BASE_URL: ${{ secrets.CLASSIFIER_API_BASE_URL }}
-      CLASSIFIER_MODEL: ${{ vars.CLASSIFIER_MODEL || 'google/gemini-2.5-flash' }}
+      CLASSIFIER_API_KEY: ${{ secrets.CLASSIFIER_API_KEY || secrets.AI_API_KEY }}
+      CLASSIFIER_API_BASE_URL: ${{ secrets.CLASSIFIER_API_BASE_URL || vars.CLASSIFIER_API_BASE_URL || vars.AI_API_BASE_URL || 'https://openrouter.ai/api/v1' }}
+      CLASSIFIER_MODEL: ${{ vars.CLASSIFIER_MODEL || vars.AI_MODEL || 'openrouter/free' }}
       DUNE_OUTPUT_TABLE: ${{ vars.DUNE_OUTPUT_TABLE || 'categorized_prediction_markets' }}
       DUNE_PERFORMANCE: ${{ vars.DUNE_PERFORMANCE || 'medium' }}
       DUNE_REFRESH_MODE: ${{ vars.DUNE_REFRESH_MODE || 'auto' }}

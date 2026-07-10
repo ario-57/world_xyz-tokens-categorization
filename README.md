@@ -8,8 +8,8 @@ Add these in `Settings -> Secrets and variables -> Actions -> Secrets`:
 
 - `DUNE_API_KEY`: Dune API key with read/write upload permissions.
 - `DUNE_NAMESPACE`: Your Dune upload namespace, usually your Dune username or team namespace.
-- `CLASSIFIER_API_KEY`: API key for the classifier service.
-- `CLASSIFIER_API_BASE_URL`: Classifier service base URL.
+- `CLASSIFIER_API_KEY`: API key for the classifier service. Existing `AI_API_KEY` also works.
+- `CLASSIFIER_API_BASE_URL`: Classifier service base URL. Existing `AI_API_BASE_URL` also works. Default: `https://openrouter.ai/api/v1`.
 
 ## Optional GitHub Variables
 
@@ -17,7 +17,7 @@ Add these in `Settings -> Secrets and variables -> Actions -> Variables` if you 
 
 - `DUNE_OUTPUT_TABLE`: Output table name. Default: `categorized_prediction_markets`.
 - `DUNE_PERFORMANCE`: Dune SQL execution tier: `small`, `medium`, or `large`. Default: `medium`.
-- `CLASSIFIER_MODEL`: Classifier model name. Default: `google/gemini-2.5-flash`.
+- `CLASSIFIER_MODEL`: Classifier model name. Existing `AI_MODEL` also works. Default: `openrouter/free`.
 - `DUNE_REFRESH_MODE`: Use `auto` for normal runs or `full_rebuild` for a one-time historical reload. Default: `auto`.
 
 ## Output Schema
@@ -58,9 +58,9 @@ Each run:
 pip install -r requirements.txt
 export DUNE_API_KEY="..."
 export DUNE_NAMESPACE="..."
-export CLASSIFIER_API_KEY="..."
-export CLASSIFIER_API_BASE_URL="..."
-export CLASSIFIER_MODEL="google/gemini-2.5-flash"
+export AI_API_KEY="..."
+export AI_API_BASE_URL="https://openrouter.ai/api/v1"
+export AI_MODEL="openrouter/free"
 export DUNE_OUTPUT_TABLE="categorized_prediction_markets"
 export DUNE_REFRESH_MODE="auto"
 python scripts/refresh_dune_prediction_tokens.py
@@ -71,9 +71,9 @@ On Windows PowerShell:
 ```powershell
 $env:DUNE_API_KEY="..."
 $env:DUNE_NAMESPACE="..."
-$env:CLASSIFIER_API_KEY="..."
-$env:CLASSIFIER_API_BASE_URL="..."
-$env:CLASSIFIER_MODEL="google/gemini-2.5-flash"
+$env:AI_API_KEY="..."
+$env:AI_API_BASE_URL="https://openrouter.ai/api/v1"
+$env:AI_MODEL="openrouter/free"
 $env:DUNE_OUTPUT_TABLE="categorized_prediction_markets"
 $env:DUNE_REFRESH_MODE="auto"
 python scripts/refresh_dune_prediction_tokens.py

@@ -85,6 +85,16 @@ def env_required(name: str) -> str:
     return value
 
 
+def env_first(*names: str, default: str | None = None) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    if default is not None:
+        return default
+    raise ConfigError(f"Missing required environment variable: {' or '.join(names)}")
+
+
 def request_with_retry(
     session: Session,
     method: str,
@@ -277,9 +287,9 @@ def categorize_batch(
 
 
 def categorize_names(session: Session, names: list[str]) -> dict[str, str]:
-    api_key = env_required("CLASSIFIER_API_KEY")
-    api_base_url = env_required("CLASSIFIER_API_BASE_URL")
-    model = os.getenv("CLASSIFIER_MODEL", "google/gemini-2.5-flash")
+    api_key = env_first("CLASSIFIER_API_KEY", "AI_API_KEY")
+    api_base_url = env_first("CLASSIFIER_API_BASE_URL", "AI_API_BASE_URL", default="https://openrouter.ai/api/v1")
+    model = env_first("CLASSIFIER_MODEL", "AI_MODEL", default="openrouter/free")
     batch_size = int(os.getenv("CLASSIFIER_BATCH_SIZE", "50"))
 
     results: dict[str, str] = {}
