@@ -19,7 +19,7 @@ jobs:
       DUNE_NAMESPACE: ${{ secrets.DUNE_NAMESPACE }}
       CLASSIFIER_API_KEY: ${{ secrets.CLASSIFIER_API_KEY }}
       CLASSIFIER_API_BASE_URL: ${{ secrets.CLASSIFIER_API_BASE_URL }}
-      CLASSIFIER_MODEL: ${{ vars.CLASSIFIER_MODEL }}
+      CLASSIFIER_MODEL: ${{ vars.CLASSIFIER_MODEL || 'google/gemini-2.5-flash' }}
       DUNE_OUTPUT_TABLE: ${{ vars.DUNE_OUTPUT_TABLE || 'categorized_prediction_markets' }}
       DUNE_PERFORMANCE: ${{ vars.DUNE_PERFORMANCE || 'medium' }}
 

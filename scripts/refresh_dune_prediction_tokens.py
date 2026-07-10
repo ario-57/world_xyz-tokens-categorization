@@ -28,6 +28,19 @@ CATEGORIES = [
     "Other",
 ]
 
+CATEGORY_GUIDANCE = {
+    "Politics": "Elections, candidates, legislation, approval, office holders, parties, or government decisions.",
+    "Crypto": "Token prices, tickers, chains, market direction, protocol names, or onchain assets.",
+    "Sports": "Teams, athletes, tournaments, matches, leagues, fights, winners, or score outcomes.",
+    "Finance": "Stocks, companies, rates, commodities, earnings, indexes, funds, or financial markets.",
+    "Entertainment": "Movies, TV, music, awards, celebrities, games, or cultural events.",
+    "Tech": "Products, apps, platforms, hardware, software, launches, or technical milestones.",
+    "Economy": "Inflation, jobs, GDP, central banks, recession, trade, or broad macro indicators.",
+    "Geopolitics": "Wars, diplomacy, sanctions, territorial disputes, international conflict, or treaties.",
+    "Weather": "Temperature, storms, hurricanes, rainfall, snowfall, climate, or natural conditions.",
+    "Other": "Use only when the name is too vague or does not fit another category.",
+}
+
 
 class ConfigError(RuntimeError):
     pass
@@ -222,14 +235,22 @@ def categorize_batch(
     model: str,
 ) -> dict[str, str]:
     system_prompt = (
-        "You categorize prediction-market token names. "
-        "Use only these categories: "
-        + ", ".join(CATEGORIES)
-        + ". If unclear, use Other. Return only valid JSON."
+        "You are a strict prediction-market token classifier. "
+        "Pick the single best category from the allowed list. "
+        "Do not invent categories. If the name is genuinely unclear, use Other. "
+        "Return only valid JSON with no prose."
     )
     user_prompt = {
         "task": "Map each token name to exactly one category.",
         "allowed_categories": CATEGORIES,
+        "category_guidance": CATEGORY_GUIDANCE,
+        "rules": [
+            "Use only the token name.",
+            "Ticker or up/down price direction names are Crypto.",
+            "World Cup, tennis, boxing, MMA, team-versus-team, athlete, match, or tournament names are Sports.",
+            "Company earnings, stock, index, rate, commodity, or market indicator names are Finance unless they are broad macroeconomic indicators.",
+            "When two categories seem possible, choose the more specific event category.",
+        ],
         "token_names": names,
         "output_shape": {"categories": {"<token name>": "<category>"}},
     }
@@ -263,7 +284,7 @@ def categorize_batch(
 def categorize_names(session: Session, names: list[str]) -> dict[str, str]:
     api_key = env_required("CLASSIFIER_API_KEY")
     api_base_url = env_required("CLASSIFIER_API_BASE_URL")
-    model = env_required("CLASSIFIER_MODEL")
+    model = os.getenv("CLASSIFIER_MODEL", "google/gemini-2.5-flash")
     batch_size = int(os.getenv("CLASSIFIER_BATCH_SIZE", "50"))
 
     results: dict[str, str] = {}

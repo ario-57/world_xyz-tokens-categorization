@@ -17,7 +17,7 @@ Add these in `Settings -> Secrets and variables -> Actions -> Variables` if you 
 
 - `DUNE_OUTPUT_TABLE`: Output table name. Default: `categorized_prediction_markets`.
 - `DUNE_PERFORMANCE`: Dune SQL execution tier: `small`, `medium`, or `large`. Default: `medium`.
-- `CLASSIFIER_MODEL`: Classifier model name.
+- `CLASSIFIER_MODEL`: Classifier model name. Default: `google/gemini-2.5-flash`.
 
 ## Output Schema
 
@@ -58,7 +58,7 @@ export DUNE_API_KEY="..."
 export DUNE_NAMESPACE="..."
 export CLASSIFIER_API_KEY="..."
 export CLASSIFIER_API_BASE_URL="..."
-export CLASSIFIER_MODEL="..."
+export CLASSIFIER_MODEL="google/gemini-2.5-flash"
 export DUNE_OUTPUT_TABLE="categorized_prediction_markets"
 python scripts/refresh_dune_prediction_tokens.py
 ```
@@ -70,7 +70,7 @@ $env:DUNE_API_KEY="..."
 $env:DUNE_NAMESPACE="..."
 $env:CLASSIFIER_API_KEY="..."
 $env:CLASSIFIER_API_BASE_URL="..."
-$env:CLASSIFIER_MODEL="..."
+$env:CLASSIFIER_MODEL="google/gemini-2.5-flash"
 $env:DUNE_OUTPUT_TABLE="categorized_prediction_markets"
 python scripts/refresh_dune_prediction_tokens.py
 ```
