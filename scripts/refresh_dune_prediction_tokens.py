@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -15,31 +16,22 @@ from requests import Response, Session
 DUNE_API_BASE_URL = "https://api.dune.com/api/v1"
 SOURCE_COLUMNS = ["token_mint_address", "symbol", "name", "decimals"]
 
-CATEGORIES = [
-    "Politics",
-    "Crypto",
-    "Sports",
-    "Finance",
-    "Entertainment",
-    "Tech",
-    "Economy",
-    "Geopolitics",
-    "Weather",
-    "Other",
-]
+CATEGORIES = ["Sport", "Crypto"]
 
 CATEGORY_GUIDANCE = {
-    "Politics": "Elections, candidates, legislation, approval, office holders, parties, or government decisions.",
     "Crypto": "Token prices, tickers, chains, market direction, protocol names, or onchain assets.",
-    "Sports": "Teams, athletes, tournaments, matches, leagues, fights, winners, or score outcomes.",
-    "Finance": "Stocks, companies, rates, commodities, earnings, indexes, funds, or financial markets.",
-    "Entertainment": "Movies, TV, music, awards, celebrities, games, or cultural events.",
-    "Tech": "Products, apps, platforms, hardware, software, launches, or technical milestones.",
-    "Economy": "Inflation, jobs, GDP, central banks, recession, trade, or broad macro indicators.",
-    "Geopolitics": "Wars, diplomacy, sanctions, territorial disputes, international conflict, or treaties.",
-    "Weather": "Temperature, storms, hurricanes, rainfall, snowfall, climate, or natural conditions.",
-    "Other": "Use only when the name is too vague or does not fit another category.",
+    "Sport": "Teams, athletes, tournaments, matches, leagues, fights, winners, or score outcomes.",
 }
+
+SPORT_PATTERN = re.compile(
+    r"\b("
+    r"wc26|wm26|ww26|world cup|championship|tournament|"
+    r"wins?|doesn'?t win|beats?|loses?|vs|"
+    r"tennis|football|soccer|basketball|baseball|hockey|"
+    r"boxing|mma|ufc|fifa|nba|nfl|mlb|nhl|epl"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 class ConfigError(RuntimeError):
@@ -226,6 +218,10 @@ def extract_json_object(text: str) -> dict[str, Any]:
         return json.loads(text[start : end + 1])
 
 
+def fallback_category(name: str) -> str:
+    return "Sport" if SPORT_PATTERN.search(name) else "Crypto"
+
+
 def categorize_batch(
     session: Session,
     names: list[str],
@@ -236,8 +232,8 @@ def categorize_batch(
 ) -> dict[str, str]:
     system_prompt = (
         "You are a strict prediction-market token classifier. "
-        "Pick the single best category from the allowed list. "
-        "Do not invent categories. If the name is genuinely unclear, use Other. "
+        "Every token name must be classified as exactly one of: Sport or Crypto. "
+        "Do not invent categories. Do not use unclear, unknown, other, or null. "
         "Return only valid JSON with no prose."
     )
     user_prompt = {
@@ -246,10 +242,9 @@ def categorize_batch(
         "category_guidance": CATEGORY_GUIDANCE,
         "rules": [
             "Use only the token name.",
-            "Ticker or up/down price direction names are Crypto.",
-            "World Cup, tennis, boxing, MMA, team-versus-team, athlete, match, or tournament names are Sports.",
-            "Company earnings, stock, index, rate, commodity, or market indicator names are Finance unless they are broad macroeconomic indicators.",
-            "When two categories seem possible, choose the more specific event category.",
+            "Ticker names, asset names, chains, symbols, or up/down price direction names are Crypto.",
+            "World Cup, tennis, boxing, MMA, team-versus-team, athlete, match, fight, or tournament names are Sport.",
+            "If the name is short, ticker-like, or unclear, choose Crypto.",
         ],
         "token_names": names,
         "output_shape": {"categories": {"<token name>": "<category>"}},
@@ -276,8 +271,8 @@ def categorize_batch(
 
     categories: dict[str, str] = {}
     for name in names:
-        category = str(raw_categories.get(name, "Other")).strip()
-        categories[name] = category if category in CATEGORIES else "Other"
+        category = str(raw_categories.get(name, "")).strip()
+        categories[name] = category if category in CATEGORIES else fallback_category(name)
     return categories
 
 
@@ -302,8 +297,8 @@ def categorize_names(session: Session, names: list[str]) -> dict[str, str]:
                 )
             )
         except Exception as exc:
-            print(f"Categorization failed for batch; using Other. Error: {exc}", file=sys.stderr)
-            results.update({name: "Other" for name in batch})
+            print(f"Categorization failed for batch; using fallback rules. Error: {exc}", file=sys.stderr)
+            results.update({name: fallback_category(name) for name in batch})
     return results
 
 
@@ -314,7 +309,11 @@ def prepare_final_dataset(df: pd.DataFrame, categories: dict[str, str]) -> pd.Da
 
     final = df[SOURCE_COLUMNS].copy()
     final = final.drop_duplicates(subset=["token_mint_address"], keep="first")
-    final["category"] = final["name"].fillna("").astype(str).map(categories).fillna("Other")
+    final["category"] = final["name"].fillna("").astype(str).map(categories)
+    final["category"] = final.apply(
+        lambda row: row["category"] if row["category"] in CATEGORIES else fallback_category(str(row["name"] or "")),
+        axis=1,
+    )
     final["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     return final[["token_mint_address", "symbol", "name", "decimals", "category", "updated_at"]]
 
@@ -414,11 +413,25 @@ def insert_table(session: Session, api_key: str, namespace: str, table_name: str
     print(f"Inserted table rows: {response.text}")
 
 
+def clear_table(session: Session, api_key: str, namespace: str, table_name: str) -> None:
+    response = request_with_retry(
+        session,
+        "POST",
+        f"{DUNE_API_BASE_URL}/uploads/{namespace}/{table_name}/clear",
+        headers={"X-DUNE-API-KEY": api_key},
+    )
+    raise_for_api_error(response, "Dune table clear")
+    print(f"Cleared table: {namespace}.{table_name}")
+
+
 def main() -> None:
     dune_api_key = env_required("DUNE_API_KEY")
     namespace = env_required("DUNE_NAMESPACE")
     table_name = os.getenv("DUNE_OUTPUT_TABLE", "categorized_prediction_markets")
     performance = os.getenv("DUNE_PERFORMANCE", "medium")
+    refresh_mode = os.getenv("DUNE_REFRESH_MODE", "auto").strip().lower()
+    if refresh_mode not in {"auto", "full_rebuild"}:
+        raise ConfigError("DUNE_REFRESH_MODE must be auto or full_rebuild")
 
     with requests.Session() as session:
         exists_before_run = table_exists(session, dune_api_key, namespace, table_name)
@@ -430,8 +443,15 @@ def main() -> None:
             namespace,
             table_name,
         )
-        incremental = existing_rows > 0
-        mode = "incremental last-24-hours append" if incremental else "initial full seed"
+        full_rebuild = refresh_mode == "full_rebuild"
+        incremental = existing_rows > 0 and not full_rebuild
+        mode = (
+            "full rebuild"
+            if full_rebuild
+            else "incremental last-24-hours append"
+            if incremental
+            else "initial full seed"
+        )
         print(f"Running in {mode} mode. Existing rows: {existing_rows}")
 
         source_sql = build_source_sql(incremental=incremental, namespace=namespace, table_name=table_name)
@@ -454,6 +474,8 @@ def main() -> None:
         print("Category counts:")
         print(final_df["category"].value_counts().to_string())
 
+        if full_rebuild and existing_rows > 0:
+            clear_table(session, dune_api_key, namespace, table_name)
         insert_table(session, dune_api_key, namespace, table_name, final_df)
         print(f"Refresh complete: {namespace}.{table_name} ({len(final_df)} inserted rows)")
 

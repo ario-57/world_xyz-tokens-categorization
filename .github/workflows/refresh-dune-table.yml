@@ -22,6 +22,7 @@ jobs:
       CLASSIFIER_MODEL: ${{ vars.CLASSIFIER_MODEL || 'google/gemini-2.5-flash' }}
       DUNE_OUTPUT_TABLE: ${{ vars.DUNE_OUTPUT_TABLE || 'categorized_prediction_markets' }}
       DUNE_PERFORMANCE: ${{ vars.DUNE_PERFORMANCE || 'medium' }}
+      DUNE_REFRESH_MODE: ${{ vars.DUNE_REFRESH_MODE || 'auto' }}
 
     steps:
       - name: Check out repository
