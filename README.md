@@ -16,10 +16,20 @@ Add these in `Settings -> Secrets and variables -> Actions -> Secrets`:
 Add these in `Settings -> Secrets and variables -> Actions -> Variables` if you want to override defaults:
 
 - `DUNE_OUTPUT_TABLE`: Output table name. Default: `categorized_prediction_markets`.
-- `DUNE_PERFORMANCE`: Dune SQL execution tier: `small`, `medium`, or `large`. Default: `medium`.
+- `DUNE_PERFORMANCE`: Dune SQL execution tier: `small`, `medium`, or `large`. Default: `small` to minimize credit usage.
 - `CLASSIFIER_MODEL`: Classifier model name. Existing `AI_MODEL` also works. Default: `openrouter/free`.
 - `DUNE_REFRESH_MODE`: Use `auto` for normal runs or `full_rebuild` for a one-time historical reload. Default: `auto`.
-- `DUNE_RUN_LIMIT`: Maximum tokens fetched, categorized, and uploaded per automatic run. Default: `30`.
+
+## Required Dune Credit Cap
+
+GitHub Actions cannot set a Dune compute-credit limit in an individual SQL execution request. Configure the hard cap in Dune before enabling the schedule:
+
+1. Sign in to Dune and select the user or team that owns the API key.
+2. Open `Settings`.
+3. Find the query cost cap setting and set the maximum cost per query to `30` credits.
+4. Save the setting and keep `DUNE_PERFORMANCE` set to `small`.
+
+Dune applies this cap to API-triggered queries. If an execution reaches the cap, Dune stops it instead of allowing that query to consume more than 30 compute credits. Configure the cap on the same user or team account associated with `DUNE_API_KEY`.
 
 ## Output Schema
 
@@ -36,23 +46,24 @@ updated_at
 
 ## Initial Load And Daily Incremental Loads
 
-Automatic runs process at most `DUNE_RUN_LIMIT` missing tokens.
+The script checks whether the configured Dune output table already exists.
 
-- Tokens created in the last 24 hours are processed first.
-- Any capacity left in the 30-row batch is used to backfill older missing tokens, newest first.
+- First run, or after selecting `full_rebuild`: loads all matching historical tokens.
+- Normal later runs query only tokens created within the last 24 hours.
 - The `NOT EXISTS` check prevents duplicate `token_mint_address` values across runs.
-- A full rebuild is blocked while a row limit is enabled because clearing the table and inserting only a partial batch would lose data. Normal capped runs will gradually complete the historical backfill.
 
-This design keeps each automatic result and upload small while ensuring newly created tokens are not delayed behind the historical backlog. The SQL engine may still scan source and destination data to find missing rows, so `LIMIT 30` controls returned rows and downstream API usage but is not a strict guarantee of Dune compute credits.
+The 30-credit query cost cap is enforced by Dune, independently of how many tokens the query returns.
 
 Each run:
 
 1. Creates the Dune upload table if needed.
-2. Queries up to 30 missing tokens, prioritizing the last 24 hours.
-3. Uses spare batch capacity for historical backfill.
+2. Runs the historical query on the first load or the last-24-hours query on normal runs.
+3. Lets Dune enforce the configured 30-credit maximum for that query.
 4. Drops duplicate `token_mint_address` values within the current batch.
 5. Categorizes new token names as `Sport` or `Crypto`.
 6. Appends only the new rows to the destination table.
+
+The Actions log prints Dune's reported execution cost after each completed SQL query.
 
 ## Run Locally
 
@@ -65,7 +76,7 @@ export AI_API_BASE_URL="https://openrouter.ai/api/v1"
 export AI_MODEL="openrouter/free"
 export DUNE_OUTPUT_TABLE="categorized_prediction_markets"
 export DUNE_REFRESH_MODE="auto"
-export DUNE_RUN_LIMIT="30"
+export DUNE_PERFORMANCE="small"
 python scripts/refresh_dune_prediction_tokens.py
 ```
 
@@ -79,7 +90,7 @@ $env:AI_API_BASE_URL="https://openrouter.ai/api/v1"
 $env:AI_MODEL="openrouter/free"
 $env:DUNE_OUTPUT_TABLE="categorized_prediction_markets"
 $env:DUNE_REFRESH_MODE="auto"
-$env:DUNE_RUN_LIMIT="30"
+$env:DUNE_PERFORMANCE="small"
 python scripts/refresh_dune_prediction_tokens.py
 ```
 
