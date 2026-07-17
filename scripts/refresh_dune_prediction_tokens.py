@@ -118,7 +118,9 @@ def request_with_retry(
             last_error = exc
             if attempt == max_attempts:
                 break
-            sleep_seconds = min(60, 2 ** attempt)
+            response = getattr(exc, "response", None)
+            retry_after = response.headers.get("Retry-After") if response is not None else None
+            sleep_seconds = int(retry_after) if retry_after and retry_after.isdigit() else min(180, 5 * 2 ** attempt)
             print(f"Retrying {method} {url} after error: {exc}. Sleeping {sleep_seconds}s")
             time.sleep(sleep_seconds)
     raise RuntimeError(f"Request failed after {max_attempts} attempts: {last_error}")
@@ -181,27 +183,22 @@ def fetch_dune_results(
     *,
     columns: list[str] | None = None,
 ) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    offset = 0
-    limit = int(os.getenv("DUNE_RESULT_PAGE_SIZE", "1000"))
+    csv_response = request_with_retry(
+        session,
+        "GET",
+        f"{DUNE_API_BASE_URL}/execution/{execution_id}/results/csv",
+        headers={"X-DUNE-API-KEY": api_key},
+        params={"columns": ",".join(columns)} if columns else None,
+        max_attempts=8,
+        timeout=180,
+    )
+    if csv_response.ok:
+        csv_text = csv_response.text.strip()
+        if not csv_text:
+            return pd.DataFrame(columns=columns)
+        return pd.read_csv(io.StringIO(csv_text))
 
-    while True:
-        response = request_with_retry(
-            session,
-            "GET",
-            f"{DUNE_API_BASE_URL}/execution/{execution_id}/results",
-            headers={"X-DUNE-API-KEY": api_key},
-            params={"limit": limit, "offset": offset},
-        )
-        raise_for_api_error(response, "Dune execution results")
-        payload = response.json()
-        rows.extend(payload.get("result", {}).get("rows", []))
-        next_offset = payload.get("next_offset")
-        if next_offset is None:
-            break
-        offset = int(next_offset)
-
-    return pd.DataFrame(rows, columns=columns)
+    raise_for_api_error(csv_response, "Dune execution CSV results")
 
 
 def execute_sql_to_dataframe(
@@ -442,18 +439,20 @@ def main() -> None:
     refresh_mode = os.getenv("DUNE_REFRESH_MODE", "auto").strip().lower()
     if refresh_mode not in {"auto", "full_rebuild"}:
         raise ConfigError("DUNE_REFRESH_MODE must be auto or full_rebuild")
+    full_rebuild = refresh_mode == "full_rebuild"
 
     with requests.Session() as session:
         exists_before_run = table_exists(session, dune_api_key, namespace, table_name)
         create_table_if_needed(session, dune_api_key, namespace, table_name)
-        existing_rows = 0 if not exists_before_run else get_table_row_count(
-            session,
-            dune_api_key,
-            performance,
-            namespace,
-            table_name,
-        )
-        full_rebuild = refresh_mode == "full_rebuild"
+        existing_rows = 0
+        if exists_before_run and not full_rebuild:
+            existing_rows = get_table_row_count(
+                session,
+                dune_api_key,
+                performance,
+                namespace,
+                table_name,
+            )
         incremental = existing_rows > 0 and not full_rebuild
         mode = (
             "full rebuild"
@@ -462,7 +461,10 @@ def main() -> None:
             if incremental
             else "initial full seed"
         )
-        print(f"Running in {mode} mode. Existing rows: {existing_rows}")
+        if full_rebuild:
+            print(f"Running in {mode} mode. Existing rows were not counted to reduce Dune API usage.")
+        else:
+            print(f"Running in {mode} mode. Existing rows: {existing_rows}")
 
         source_sql = build_source_sql(incremental=incremental, namespace=namespace, table_name=table_name)
         source_df = execute_sql_to_dataframe(
@@ -484,7 +486,7 @@ def main() -> None:
         print("Category counts:")
         print(final_df["category"].value_counts().to_string())
 
-        if full_rebuild and existing_rows > 0:
+        if full_rebuild and exists_before_run:
             clear_table(session, dune_api_key, namespace, table_name)
         insert_table(session, dune_api_key, namespace, table_name, final_df)
         print(f"Refresh complete: {namespace}.{table_name} ({len(final_df)} inserted rows)")
