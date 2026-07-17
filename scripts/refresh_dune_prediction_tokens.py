@@ -429,7 +429,7 @@ def main() -> None:
     dune_api_key = env_required("DUNE_API_KEY")
     namespace = env_required("DUNE_NAMESPACE")
     table_name = os.getenv("DUNE_OUTPUT_TABLE", "categorized_prediction_markets")
-    performance = os.getenv("DUNE_PERFORMANCE", "small")
+    performance = os.getenv("DUNE_PERFORMANCE", "medium")
     refresh_mode = os.getenv("DUNE_REFRESH_MODE", "auto").strip().lower()
     if refresh_mode not in {"auto", "full_rebuild"}:
         raise ConfigError("DUNE_REFRESH_MODE must be auto or full_rebuild")
