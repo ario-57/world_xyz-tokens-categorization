@@ -19,6 +19,7 @@ Add these in `Settings -> Secrets and variables -> Actions -> Variables` if you 
 - `DUNE_PERFORMANCE`: Dune SQL execution tier: `small`, `medium`, or `large`. Default: `medium`.
 - `CLASSIFIER_MODEL`: Classifier model name. Existing `AI_MODEL` also works. Default: `openrouter/free`.
 - `DUNE_REFRESH_MODE`: Use `auto` for normal runs or `full_rebuild` for a one-time historical reload. Default: `auto`.
+- `DUNE_RUN_LIMIT`: Maximum tokens fetched, categorized, and uploaded per automatic run. Default: `30`.
 
 ## Output Schema
 
@@ -35,19 +36,20 @@ updated_at
 
 ## Initial Load And Daily Incremental Loads
 
-The script checks whether the configured Dune output table already exists and has rows.
+Automatic runs process at most `DUNE_RUN_LIMIT` missing tokens.
 
-- First run, or an existing empty table: loads all matching historical tokens.
-- Later runs: loads only tokens where `tokens_solana.fungible.created_at >= NOW() - INTERVAL '24' HOUR`.
-- One-time rebuild: set `DUNE_REFRESH_MODE` to `full_rebuild`, run the workflow manually, then set it back to `auto` or delete the variable.
+- Tokens created in the last 24 hours are processed first.
+- Any capacity left in the 30-row batch is used to backfill older missing tokens, newest first.
+- The `NOT EXISTS` check prevents duplicate `token_mint_address` values across runs.
+- A full rebuild is blocked while a row limit is enabled because clearing the table and inserting only a partial batch would lose data. Normal capped runs will gradually complete the historical backfill.
 
-Daily incremental loads also include a `NOT EXISTS` check against the destination Dune table, so a rerun will not append a token whose `token_mint_address` is already present.
+This design keeps each automatic result and upload small while ensuring newly created tokens are not delayed behind the historical backlog. The SQL engine may still scan source and destination data to find missing rows, so `LIMIT 30` controls returned rows and downstream API usage but is not a strict guarantee of Dune compute credits.
 
 Each run:
 
 1. Creates the Dune upload table if needed.
-2. Counts existing destination rows.
-3. Runs the historical or last-24-hours Dune SQL query.
+2. Queries up to 30 missing tokens, prioritizing the last 24 hours.
+3. Uses spare batch capacity for historical backfill.
 4. Drops duplicate `token_mint_address` values within the current batch.
 5. Categorizes new token names as `Sport` or `Crypto`.
 6. Appends only the new rows to the destination table.
@@ -63,6 +65,7 @@ export AI_API_BASE_URL="https://openrouter.ai/api/v1"
 export AI_MODEL="openrouter/free"
 export DUNE_OUTPUT_TABLE="categorized_prediction_markets"
 export DUNE_REFRESH_MODE="auto"
+export DUNE_RUN_LIMIT="30"
 python scripts/refresh_dune_prediction_tokens.py
 ```
 
@@ -76,6 +79,7 @@ $env:AI_API_BASE_URL="https://openrouter.ai/api/v1"
 $env:AI_MODEL="openrouter/free"
 $env:DUNE_OUTPUT_TABLE="categorized_prediction_markets"
 $env:DUNE_REFRESH_MODE="auto"
+$env:DUNE_RUN_LIMIT="30"
 python scripts/refresh_dune_prediction_tokens.py
 ```
 
