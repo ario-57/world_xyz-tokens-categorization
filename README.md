@@ -16,7 +16,7 @@ Add these in `Settings -> Secrets and variables -> Actions -> Secrets`:
 Add these in `Settings -> Secrets and variables -> Actions -> Variables` if you want to override defaults:
 
 - `DUNE_OUTPUT_TABLE`: Output table name. Default: `categorized_prediction_markets`.
-- `DUNE_PERFORMANCE`: Dune SQL execution tier: `small`, `medium`, or `large`. Default: `small` to minimize credit usage.
+- `DUNE_PERFORMANCE`: Dune SQL execution tier: `small`, `medium`, or `large`. Default: `medium` for reliable API execution.
 - `CLASSIFIER_MODEL`: Classifier model name. Existing `AI_MODEL` also works. Default: `openrouter/free`.
 - `DUNE_REFRESH_MODE`: Use `auto` for normal runs or `full_rebuild` for a one-time historical reload. Default: `auto`.
 
@@ -27,7 +27,7 @@ GitHub Actions cannot set a Dune compute-credit limit in an individual SQL execu
 1. Sign in to Dune and select the user or team that owns the API key.
 2. Open `Settings`.
 3. Find the query cost cap setting and set the maximum cost per query to `30` credits.
-4. Save the setting and keep `DUNE_PERFORMANCE` set to `small`.
+4. Save the setting and keep `DUNE_PERFORMANCE` set to `medium`.
 
 Dune applies this cap to API-triggered queries. If an execution reaches the cap, Dune stops it instead of allowing that query to consume more than 30 compute credits. Configure the cap on the same user or team account associated with `DUNE_API_KEY`.
 
@@ -76,7 +76,7 @@ export AI_API_BASE_URL="https://openrouter.ai/api/v1"
 export AI_MODEL="openrouter/free"
 export DUNE_OUTPUT_TABLE="categorized_prediction_markets"
 export DUNE_REFRESH_MODE="auto"
-export DUNE_PERFORMANCE="small"
+export DUNE_PERFORMANCE="medium"
 python scripts/refresh_dune_prediction_tokens.py
 ```
 
@@ -90,7 +90,7 @@ $env:AI_API_BASE_URL="https://openrouter.ai/api/v1"
 $env:AI_MODEL="openrouter/free"
 $env:DUNE_OUTPUT_TABLE="categorized_prediction_markets"
 $env:DUNE_REFRESH_MODE="auto"
-$env:DUNE_PERFORMANCE="small"
+$env:DUNE_PERFORMANCE="medium"
 python scripts/refresh_dune_prediction_tokens.py
 ```
 
