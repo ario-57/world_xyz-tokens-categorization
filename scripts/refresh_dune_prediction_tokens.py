@@ -48,24 +48,28 @@ def uploaded_table_sql_name(namespace: str, table_name: str) -> str:
     return f"dune.{quote_identifier(namespace)}.{quote_identifier(table_name)}"
 
 
-def build_source_sql(*, incremental: bool, namespace: str, table_name: str) -> str:
+def build_source_sql(
+    *,
+    namespace: str,
+    table_name: str,
+    row_limit: int | None,
+    exclude_existing: bool,
+) -> str:
     filters = [
         "source.token_uri IS NOT NULL",
         "LOWER(source.token_uri) LIKE '%m.world.xyz%'",
     ]
-    if incremental:
+    if exclude_existing:
         destination_table = uploaded_table_sql_name(namespace, table_name)
-        filters.extend(
-            [
-                "source.created_at >= NOW() - INTERVAL '24' HOUR",
-                f"""
+        filters.append(
+            f"""
 NOT EXISTS (
     SELECT 1
     FROM {destination_table} existing
     WHERE existing.token_mint_address = source.token_mint_address
-)""".strip(),
-            ]
+)""".strip()
         )
+    limit_clause = f"LIMIT {row_limit}" if row_limit is not None else ""
 
     return f"""
 SELECT
@@ -75,6 +79,11 @@ SELECT
     source.decimals
 FROM tokens_solana.fungible source
 WHERE {' AND '.join(filters)}
+ORDER BY
+    CASE WHEN source.created_at >= NOW() - INTERVAL '24' HOUR THEN 0 ELSE 1 END,
+    source.created_at DESC,
+    source.token_mint_address
+{limit_clause}
 """
 
 
@@ -93,6 +102,17 @@ def env_first(*names: str, default: str | None = None) -> str:
     if default is not None:
         return default
     raise ConfigError(f"Missing required environment variable: {' or '.join(names)}")
+
+
+def env_optional_positive_int(name: str, default: int) -> int | None:
+    raw_value = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a non-negative integer") from exc
+    if value < 0:
+        raise ConfigError(f"{name} must be a non-negative integer")
+    return value or None
 
 
 def request_with_retry(
@@ -387,20 +407,6 @@ def table_exists(session: Session, api_key: str, namespace: str, table_name: str
     )
 
 
-def get_table_row_count(
-    session: Session,
-    api_key: str,
-    performance: str,
-    namespace: str,
-    table_name: str,
-) -> int:
-    sql = f"SELECT COUNT(*) AS row_count FROM {uploaded_table_sql_name(namespace, table_name)}"
-    df = execute_sql_to_dataframe(session, api_key, performance, sql, columns=["row_count"])
-    if df.empty:
-        return 0
-    return int(df.iloc[0]["row_count"])
-
-
 def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
     buffer = io.StringIO()
     df.to_csv(buffer, index=False, quoting=csv.QUOTE_MINIMAL)
@@ -440,33 +446,30 @@ def main() -> None:
     if refresh_mode not in {"auto", "full_rebuild"}:
         raise ConfigError("DUNE_REFRESH_MODE must be auto or full_rebuild")
     full_rebuild = refresh_mode == "full_rebuild"
+    row_limit = env_optional_positive_int("DUNE_RUN_LIMIT", 30)
+    if full_rebuild and row_limit is not None:
+        raise ConfigError(
+            "full_rebuild cannot run with DUNE_RUN_LIMIT enabled because it would replace the table "
+            "with a partial dataset. Use auto mode for capped backfill runs."
+        )
 
     with requests.Session() as session:
         exists_before_run = table_exists(session, dune_api_key, namespace, table_name)
         create_table_if_needed(session, dune_api_key, namespace, table_name)
-        existing_rows = 0
-        if exists_before_run and not full_rebuild:
-            existing_rows = get_table_row_count(
-                session,
-                dune_api_key,
-                performance,
-                namespace,
-                table_name,
-            )
-        incremental = existing_rows > 0 and not full_rebuild
-        mode = (
-            "full rebuild"
-            if full_rebuild
-            else "incremental last-24-hours append"
-            if incremental
-            else "initial full seed"
-        )
         if full_rebuild:
-            print(f"Running in {mode} mode. Existing rows were not counted to reduce Dune API usage.")
+            print("Running in full rebuild mode without a row limit.")
         else:
-            print(f"Running in {mode} mode. Existing rows: {existing_rows}")
+            print(
+                f"Running in capped append mode. Maximum source rows: {row_limit}. "
+                "Recent tokens are prioritized before historical backfill."
+            )
 
-        source_sql = build_source_sql(incremental=incremental, namespace=namespace, table_name=table_name)
+        source_sql = build_source_sql(
+            namespace=namespace,
+            table_name=table_name,
+            row_limit=row_limit,
+            exclude_existing=not full_rebuild,
+        )
         source_df = execute_sql_to_dataframe(
             session,
             dune_api_key,
