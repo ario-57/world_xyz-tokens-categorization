@@ -23,6 +23,7 @@ jobs:
       DUNE_OUTPUT_TABLE: ${{ vars.DUNE_OUTPUT_TABLE || 'categorized_prediction_markets' }}
       DUNE_PERFORMANCE: ${{ vars.DUNE_PERFORMANCE || 'medium' }}
       DUNE_REFRESH_MODE: ${{ vars.DUNE_REFRESH_MODE || 'auto' }}
+      DUNE_RUN_LIMIT: ${{ vars.DUNE_RUN_LIMIT || '30' }}
 
     steps:
       - name: Check out repository
