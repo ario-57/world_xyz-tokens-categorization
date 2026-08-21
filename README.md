@@ -20,7 +20,7 @@ Add these in `Settings -> Secrets and variables -> Actions -> Variables` if you 
 - `DUNE_PERFORMANCE`: Dune SQL execution tier: `small`, `medium`, or `large`. Default: `medium` for reliable API execution.
 - `CLASSIFIER_MODEL`: Classifier model name. Existing `AI_MODEL` also works. Default: `openrouter/free`.
 
-Scheduled runs always use `auto` refresh mode. For the one-time migration, start the workflow manually and choose `legacy_rebuild`. This copies historical rows from `dune.ario_57_team.categorized_prediction_markets`, then fetches and categorizes only tokens created since the latest legacy `updated_at` value. It avoids querying the full `tokens_solana.fungible` history.
+Scheduled runs always use `auto` refresh mode. For the one-time migration, start the workflow manually and choose `csv_rebuild`. This loads the checked-in `data/historical_categorized_prediction_markets.csv`, then fetches and categorizes only tokens created since the CSV's latest `updated_at` value. It avoids fetching historical rows through the Dune API.
 
 ## Required Dune Credit Cap
 
@@ -50,7 +50,7 @@ updated_at
 
 The script checks whether the configured Dune output table already exists. The GitHub Actions workflow uses the `ario_57` namespace; local runs also default to `ario_57` unless `DUNE_NAMESPACE` is set explicitly.
 
-- First run with `legacy_rebuild`: copies the historical team table and adds tokens created since its latest update.
+- First run with `csv_rebuild`: loads the historical CSV and adds tokens created since its latest update.
 - Normal later runs start from the destination table's latest `updated_at`, with a 48-hour overlap to recover from delayed or failed runs.
 - The `NOT EXISTS` check prevents duplicate `token_mint_address` values across runs.
 
@@ -59,13 +59,19 @@ The 30-credit query cost cap is enforced by Dune, independently of how many toke
 Each run:
 
 1. Creates the Dune upload table if needed.
-2. Copies the legacy uploaded table during migration or queries only the incremental source window on normal runs.
+2. Loads the local historical CSV during migration or queries only the incremental source window on normal runs.
 3. Lets Dune enforce the configured 30-credit maximum for that query.
 4. Drops duplicate `token_mint_address` values within the current batch.
 5. Categorizes new token names as `Sport`, `Crypto`, `Finance`, or `Politics`.
 6. Appends only the new rows to the destination table.
 
 The Actions log prints Dune's reported execution cost after each completed SQL query.
+
+## Historical CSV Seed
+
+`data/historical_categorized_prediction_markets.csv` contains the supplied replacement export: 93,695 rows with 93,695 unique token mint addresses. Its latest `updated_at` is `2026-08-02 06:11:00` UTC, so `csv_rebuild` queries only tokens created after that watermark, with a 48-hour safety overlap.
+
+To replace the seed later, keep the same six-column schema shown above. The script validates timestamps and categories, keeps the newest row per mint address, and rejects unsupported values before changing the destination table.
 
 ## Run Locally
 
@@ -78,8 +84,7 @@ export AI_API_BASE_URL="https://openrouter.ai/api/v1"
 export AI_MODEL="openrouter/free"
 export DUNE_OUTPUT_TABLE="categorized_prediction_markets"
 export DUNE_REFRESH_MODE="auto"
-export DUNE_LEGACY_NAMESPACE="ario_57_team"
-export DUNE_LEGACY_TABLE="categorized_prediction_markets"
+export HISTORICAL_CSV_PATH="data/historical_categorized_prediction_markets.csv"
 export DUNE_PERFORMANCE="medium"
 python scripts/refresh_dune_prediction_tokens.py
 ```
@@ -94,8 +99,7 @@ $env:AI_API_BASE_URL="https://openrouter.ai/api/v1"
 $env:AI_MODEL="openrouter/free"
 $env:DUNE_OUTPUT_TABLE="categorized_prediction_markets"
 $env:DUNE_REFRESH_MODE="auto"
-$env:DUNE_LEGACY_NAMESPACE="ario_57_team"
-$env:DUNE_LEGACY_TABLE="categorized_prediction_markets"
+$env:HISTORICAL_CSV_PATH="data/historical_categorized_prediction_markets.csv"
 $env:DUNE_PERFORMANCE="medium"
 python scripts/refresh_dune_prediction_tokens.py
 ```
