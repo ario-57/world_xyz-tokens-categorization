@@ -7,9 +7,10 @@ This workflow runs once every 24 hours, fetches `m.world.xyz` Solana fungible to
 Add these in `Settings -> Secrets and variables -> Actions -> Secrets`:
 
 - `DUNE_API_KEY`: Dune API key with read/write upload permissions.
-- `DUNE_NAMESPACE`: Your Dune upload namespace, usually your Dune username or team namespace.
 - `CLASSIFIER_API_KEY`: API key for the classifier service. Existing `AI_API_KEY` also works.
 - `CLASSIFIER_API_BASE_URL`: Classifier service base URL. Existing `AI_API_BASE_URL` also works. Default: `https://openrouter.ai/api/v1`.
+
+`DUNE_API_KEY` must belong to the personal Dune account whose namespace is `ario_57`. The GitHub Actions workflow targets that namespace explicitly and writes to `dune.ario_57.categorized_prediction_markets` by default.
 
 ## Optional GitHub Variables
 
@@ -18,7 +19,8 @@ Add these in `Settings -> Secrets and variables -> Actions -> Variables` if you 
 - `DUNE_OUTPUT_TABLE`: Output table name. Default: `categorized_prediction_markets`.
 - `DUNE_PERFORMANCE`: Dune SQL execution tier: `small`, `medium`, or `large`. Default: `medium` for reliable API execution.
 - `CLASSIFIER_MODEL`: Classifier model name. Existing `AI_MODEL` also works. Default: `openrouter/free`.
-- `DUNE_REFRESH_MODE`: Use `auto` for normal runs or `full_rebuild` for a one-time historical reload. Default: `auto`.
+
+Scheduled runs always use `auto` refresh mode. When starting the workflow manually, choose `full_rebuild` for a one-time historical reload or `auto` for a normal incremental run.
 
 ## Required Dune Credit Cap
 
@@ -46,7 +48,7 @@ updated_at
 
 ## Initial Load And Daily Incremental Loads
 
-The script checks whether the configured Dune output table already exists.
+The script checks whether the configured Dune output table already exists. The GitHub Actions workflow uses the `ario_57` namespace; local runs also default to `ario_57` unless `DUNE_NAMESPACE` is set explicitly.
 
 - First run, or after selecting `full_rebuild`: loads all matching historical tokens.
 - Normal later runs query only tokens created within the last 24 hours.
@@ -70,7 +72,7 @@ The Actions log prints Dune's reported execution cost after each completed SQL q
 ```bash
 pip install -r requirements.txt
 export DUNE_API_KEY="..."
-export DUNE_NAMESPACE="..."
+export DUNE_NAMESPACE="ario_57"
 export AI_API_KEY="..."
 export AI_API_BASE_URL="https://openrouter.ai/api/v1"
 export AI_MODEL="openrouter/free"
@@ -84,7 +86,7 @@ On Windows PowerShell:
 
 ```powershell
 $env:DUNE_API_KEY="..."
-$env:DUNE_NAMESPACE="..."
+$env:DUNE_NAMESPACE="ario_57"
 $env:AI_API_KEY="..."
 $env:AI_API_BASE_URL="https://openrouter.ai/api/v1"
 $env:AI_MODEL="openrouter/free"
