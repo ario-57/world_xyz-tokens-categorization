@@ -6,6 +6,7 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -119,20 +120,6 @@ SELECT
     source.decimals
 FROM tokens_solana.fungible source
 WHERE {' AND '.join(filters)}
-"""
-
-
-def build_legacy_table_sql(namespace: str, table_name: str) -> str:
-    legacy_table = uploaded_table_sql_name(namespace, table_name)
-    return f"""
-SELECT
-    token_mint_address,
-    symbol,
-    name,
-    decimals,
-    category,
-    updated_at
-FROM {legacy_table}
 """
 
 
@@ -405,27 +392,36 @@ def prepare_final_dataset(df: pd.DataFrame, categories: dict[str, str]) -> pd.Da
     return final[OUTPUT_COLUMNS]
 
 
-def prepare_legacy_dataset(df: pd.DataFrame) -> pd.DataFrame:
+def prepare_historical_dataset(df: pd.DataFrame) -> pd.DataFrame:
     missing = [column for column in OUTPUT_COLUMNS if column not in df.columns]
     if missing:
-        raise RuntimeError(f"Missing expected legacy table columns: {missing}")
+        raise RuntimeError(f"Missing expected historical CSV columns: {missing}")
 
-    legacy = df[OUTPUT_COLUMNS].copy()
-    legacy = legacy.drop_duplicates(subset=["token_mint_address"], keep="last")
+    historical = df[OUTPUT_COLUMNS].copy()
+    timestamps = pd.to_datetime(
+        historical["updated_at"], errors="coerce", utc=True, format="mixed"
+    )
+    if timestamps.isna().any():
+        raise RuntimeError("Historical CSV contains invalid updated_at values")
+    historical["_parsed_updated_at"] = timestamps
+    historical = historical.sort_values("_parsed_updated_at").drop_duplicates(
+        subset=["token_mint_address"], keep="last"
+    )
 
     category_lookup = {category.casefold(): category for category in CATEGORIES}
-    raw_categories = legacy["category"].fillna("").astype(str).str.strip()
+    raw_categories = historical["category"].fillna("").astype(str).str.strip()
     normalized_categories = raw_categories.str.casefold().map(category_lookup)
     invalid_categories = sorted(set(raw_categories[normalized_categories.isna()]))
     if invalid_categories:
-        raise RuntimeError(f"Legacy table contains unsupported categories: {invalid_categories}")
-    legacy["category"] = normalized_categories
+        raise RuntimeError(
+            f"Historical CSV contains unsupported categories: {invalid_categories}"
+        )
+    historical["category"] = normalized_categories
 
-    timestamps = pd.to_datetime(legacy["updated_at"], errors="coerce", utc=True, format="mixed")
-    if timestamps.isna().any():
-        raise RuntimeError("Legacy table contains invalid updated_at values")
-    legacy["updated_at"] = timestamps.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    return legacy
+    historical["updated_at"] = historical["_parsed_updated_at"].dt.strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    return historical[OUTPUT_COLUMNS]
 
 
 def latest_update_time(df: pd.DataFrame) -> datetime:
@@ -436,30 +432,27 @@ def latest_update_time(df: pd.DataFrame) -> datetime:
     return latest.to_pydatetime()
 
 
-def build_legacy_rebuild_dataset(
+def build_csv_rebuild_dataset(
     session: Session,
     api_key: str,
     performance: str,
     *,
     destination_namespace: str,
     destination_table_name: str,
-    legacy_namespace: str,
-    legacy_table_name: str,
+    historical_csv_path: str,
 ) -> pd.DataFrame:
-    legacy_df = execute_sql_to_dataframe(
-        session,
-        api_key,
-        performance,
-        build_legacy_table_sql(legacy_namespace, legacy_table_name),
-        columns=OUTPUT_COLUMNS,
-    )
-    if legacy_df.empty:
-        raise RuntimeError(f"Legacy table {legacy_namespace}.{legacy_table_name} is empty")
+    csv_path = Path(historical_csv_path)
+    if not csv_path.is_file():
+        raise RuntimeError(f"Historical CSV does not exist: {csv_path}")
 
-    legacy = prepare_legacy_dataset(legacy_df)
-    cutoff = latest_update_time(legacy) - timedelta(hours=48)
+    historical_df = pd.read_csv(csv_path)
+    if historical_df.empty:
+        raise RuntimeError(f"Historical CSV is empty: {csv_path}")
+
+    historical = prepare_historical_dataset(historical_df)
+    cutoff = latest_update_time(historical) - timedelta(hours=48)
     print(
-        f"Fetched {len(legacy)} legacy rows. "
+        f"Loaded {len(historical)} unique historical rows from {csv_path}. "
         f"Checking source tokens created since {cutoff.isoformat()} with a 48-hour overlap."
     )
 
@@ -475,18 +468,18 @@ def build_legacy_rebuild_dataset(
         ),
         columns=SOURCE_COLUMNS,
     )
-    legacy_mints = set(legacy["token_mint_address"].astype(str))
+    historical_mints = set(historical["token_mint_address"].astype(str))
     recent_df = recent_df[
-        ~recent_df["token_mint_address"].astype(str).isin(legacy_mints)
+        ~recent_df["token_mint_address"].astype(str).isin(historical_mints)
     ].copy()
-    print(f"Fetched {len(recent_df)} tokens not already present in the legacy table")
+    print(f"Fetched {len(recent_df)} tokens not already present in the historical CSV")
 
     if recent_df.empty:
-        return legacy
+        return historical
 
     unique_names = sorted(recent_df["name"].dropna().astype(str).unique())
     recent = prepare_final_dataset(recent_df, categorize_names(session, unique_names))
-    combined = pd.concat([legacy, recent], ignore_index=True)
+    combined = pd.concat([historical, recent], ignore_index=True)
     return combined.drop_duplicates(subset=["token_mint_address"], keep="last")[OUTPUT_COLUMNS]
 
 
@@ -595,44 +588,43 @@ def main() -> None:
     table_name = os.getenv("DUNE_OUTPUT_TABLE", "categorized_prediction_markets")
     performance = os.getenv("DUNE_PERFORMANCE", "medium")
     refresh_mode = os.getenv("DUNE_REFRESH_MODE", "auto").strip().lower()
-    if refresh_mode not in {"auto", "legacy_rebuild"}:
-        raise ConfigError("DUNE_REFRESH_MODE must be auto or legacy_rebuild")
-    legacy_rebuild = refresh_mode == "legacy_rebuild"
+    if refresh_mode not in {"auto", "csv_rebuild"}:
+        raise ConfigError("DUNE_REFRESH_MODE must be auto or csv_rebuild")
+    csv_rebuild = refresh_mode == "csv_rebuild"
 
     with requests.Session() as session:
         listed_before_run = table_exists(session, dune_api_key, namespace, table_name)
         already_existed = create_table_if_needed(session, dune_api_key, namespace, table_name)
         exists_before_run = listed_before_run or already_existed
 
-        if legacy_rebuild:
-            legacy_namespace = os.getenv("DUNE_LEGACY_NAMESPACE", "ario_57_team").strip()
-            legacy_table_name = os.getenv(
-                "DUNE_LEGACY_TABLE", "categorized_prediction_markets"
+        if csv_rebuild:
+            historical_csv_path = os.getenv(
+                "HISTORICAL_CSV_PATH",
+                "data/historical_categorized_prediction_markets.csv",
             ).strip()
             print(
-                "Running in legacy rebuild mode from "
-                f"dune.{legacy_namespace}.{legacy_table_name} with the {performance} Dune engine."
+                f"Running in CSV rebuild mode from {historical_csv_path} "
+                f"with the {performance} Dune engine."
             )
-            final_df = build_legacy_rebuild_dataset(
+            final_df = build_csv_rebuild_dataset(
                 session,
                 dune_api_key,
                 performance,
                 destination_namespace=namespace,
                 destination_table_name=table_name,
-                legacy_namespace=legacy_namespace,
-                legacy_table_name=legacy_table_name,
+                historical_csv_path=historical_csv_path,
             )
             print("Category counts:")
             print(final_df["category"].value_counts().to_string())
             if exists_before_run:
                 clear_table(session, dune_api_key, namespace, table_name)
             insert_table(session, dune_api_key, namespace, table_name, final_df)
-            print(f"Legacy rebuild complete: {namespace}.{table_name} ({len(final_df)} rows)")
+            print(f"CSV rebuild complete: {namespace}.{table_name} ({len(final_df)} rows)")
             return
 
         if not exists_before_run:
             raise ConfigError(
-                "Destination table is new. Run once with DUNE_REFRESH_MODE=legacy_rebuild "
+                "Destination table is new. Run once with DUNE_REFRESH_MODE=csv_rebuild "
                 "instead of executing a credit-heavy historical source query."
             )
 
