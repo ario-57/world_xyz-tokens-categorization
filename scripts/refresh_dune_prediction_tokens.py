@@ -427,7 +427,9 @@ def clear_table(session: Session, api_key: str, namespace: str, table_name: str)
 
 def main() -> None:
     dune_api_key = env_required("DUNE_API_KEY")
-    namespace = env_required("DUNE_NAMESPACE")
+    namespace = os.getenv("DUNE_NAMESPACE", "ario_57").strip()
+    if not namespace:
+        raise ConfigError("DUNE_NAMESPACE cannot be empty")
     table_name = os.getenv("DUNE_OUTPUT_TABLE", "categorized_prediction_markets")
     performance = os.getenv("DUNE_PERFORMANCE", "medium")
     refresh_mode = os.getenv("DUNE_REFRESH_MODE", "auto").strip().lower()
