@@ -69,7 +69,7 @@ The Actions log prints Dune's reported execution cost after each completed SQL q
 
 ## Historical CSV Seed
 
-`data/historical_categorized_prediction_markets.csv` is a deduplicated export of Dune query `8397329`. It contains the latest row for each of 100 unique token mint addresses from the supplied 93,695-row export. Its latest `updated_at` is `2026-07-26 06:14:23` UTC, so `csv_rebuild` queries only tokens created after that watermark, with a 48-hour safety overlap.
+`data/historical_categorized_prediction_markets.csv` contains the supplied replacement export: 93,695 rows with 93,695 unique token mint addresses. Its latest `updated_at` is `2026-08-02 06:11:00` UTC, so `csv_rebuild` queries only tokens created after that watermark, with a 48-hour safety overlap.
 
 To replace the seed later, keep the same six-column schema shown above. The script validates timestamps and categories, keeps the newest row per mint address, and rejects unsupported values before changing the destination table.
 
