@@ -5,7 +5,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -15,11 +15,20 @@ from requests import Response, Session
 
 DUNE_API_BASE_URL = "https://api.dune.com/api/v1"
 SOURCE_COLUMNS = ["token_mint_address", "symbol", "name", "decimals"]
+OUTPUT_COLUMNS = SOURCE_COLUMNS + ["category", "updated_at"]
 
-CATEGORIES = ["Sport", "Crypto"]
+CATEGORIES = ["Sport", "Crypto", "Finance", "Politics"]
 
 CATEGORY_GUIDANCE = {
     "Crypto": "Token prices, tickers, chains, market direction, protocol names, or onchain assets.",
+    "Finance": (
+        "Stocks, companies, earnings, interest rates, inflation, currencies, "
+        "commodities, or macroeconomics."
+    ),
+    "Politics": (
+        "Elections, candidates, governments, legislation, public policy, "
+        "or geopolitical political outcomes."
+    ),
     "Sport": "Teams, athletes, tournaments, matches, leagues, fights, winners, or score outcomes.",
 }
 
@@ -29,6 +38,25 @@ SPORT_PATTERN = re.compile(
     r"wins?|doesn'?t win|beats?|loses?|vs|"
     r"tennis|football|soccer|basketball|baseball|hockey|"
     r"boxing|mma|ufc|fifa|nba|nfl|mlb|nhl|epl"
+    r")\b",
+    re.IGNORECASE,
+)
+
+POLITICS_PATTERN = re.compile(
+    r"\b("
+    r"elections?|electoral|candidates?|campaigns?|politics?|political|"
+    r"presidents?|prime ministers?|congress|senate|parliament|"
+    r"governors?|mayors?|democrats?|republicans?|votes?|ballots?|referendums?|"
+    r"governments?|legislation|public policy|geopolitics?"
+    r")\b",
+    re.IGNORECASE,
+)
+
+FINANCE_PATTERN = re.compile(
+    r"\b("
+    r"stocks?|shares?|s&p|nasdaq|dow jones|earnings|revenue|interest rates?|"
+    r"federal reserve|the fed|ecb|inflation|cpi|gdp|unemployment|"
+    r"banks?|bonds?|treasur(?:y|ies)|gold|silver|oil|commodit(?:y|ies)|forex"
     r")\b",
     re.IGNORECASE,
 )
@@ -48,16 +76,32 @@ def uploaded_table_sql_name(namespace: str, table_name: str) -> str:
     return f"dune.{quote_identifier(namespace)}.{quote_identifier(table_name)}"
 
 
-def build_source_sql(*, incremental: bool, namespace: str, table_name: str) -> str:
+def build_source_sql(
+    *,
+    incremental: bool,
+    namespace: str,
+    table_name: str,
+    created_after: datetime | None = None,
+) -> str:
     filters = [
         "source.token_uri IS NOT NULL",
         "LOWER(source.token_uri) LIKE '%m.world.xyz%'",
     ]
-    if incremental:
+    if created_after is not None:
+        cutoff = created_after.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+        filters.append(f"source.created_at >= from_iso8601_timestamp('{cutoff}')")
+    elif incremental:
         destination_table = uploaded_table_sql_name(namespace, table_name)
         filters.extend(
             [
-                "source.created_at >= NOW() - INTERVAL '24' HOUR",
+                f"""
+source.created_at >= COALESCE(
+    (
+        SELECT MAX(history.updated_at) - INTERVAL '48' HOUR
+        FROM {destination_table} history
+    ),
+    NOW() - INTERVAL '72' HOUR
+)""".strip(),
                 f"""
 NOT EXISTS (
     SELECT 1
@@ -75,6 +119,20 @@ SELECT
     source.decimals
 FROM tokens_solana.fungible source
 WHERE {' AND '.join(filters)}
+"""
+
+
+def build_legacy_table_sql(namespace: str, table_name: str) -> str:
+    legacy_table = uploaded_table_sql_name(namespace, table_name)
+    return f"""
+SELECT
+    token_mint_address,
+    symbol,
+    name,
+    decimals,
+    category,
+    updated_at
+FROM {legacy_table}
 """
 
 
@@ -234,7 +292,13 @@ def extract_json_object(text: str) -> dict[str, Any]:
 
 
 def fallback_category(name: str) -> str:
-    return "Sport" if SPORT_PATTERN.search(name) else "Crypto"
+    if SPORT_PATTERN.search(name):
+        return "Sport"
+    if POLITICS_PATTERN.search(name):
+        return "Politics"
+    if FINANCE_PATTERN.search(name):
+        return "Finance"
+    return "Crypto"
 
 
 def categorize_batch(
@@ -247,7 +311,7 @@ def categorize_batch(
 ) -> dict[str, str]:
     system_prompt = (
         "You are a strict prediction-market token classifier. "
-        "Every token name must be classified as exactly one of: Sport or Crypto. "
+        f"Every token name must be classified as exactly one of: {', '.join(CATEGORIES)}. "
         "Do not invent categories. Do not use unclear, unknown, other, or null. "
         "Return only valid JSON with no prose."
     )
@@ -258,6 +322,14 @@ def categorize_batch(
         "rules": [
             "Use only the token name.",
             "Ticker names, asset names, chains, symbols, or up/down price direction names are Crypto.",
+            (
+                "Stocks, companies, earnings, rates, inflation, currencies, "
+                "commodities, and macroeconomics are Finance."
+            ),
+            (
+                "Elections, candidates, governments, legislation, public policy, "
+                "and political outcomes are Politics."
+            ),
             "World Cup, tennis, boxing, MMA, team-versus-team, athlete, match, fight, or tournament names are Sport.",
             "If the name is short, ticker-like, or unclear, choose Crypto.",
         ],
@@ -330,10 +402,97 @@ def prepare_final_dataset(df: pd.DataFrame, categories: dict[str, str]) -> pd.Da
         axis=1,
     )
     final["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    return final[["token_mint_address", "symbol", "name", "decimals", "category", "updated_at"]]
+    return final[OUTPUT_COLUMNS]
 
 
-def create_table_if_needed(session: Session, api_key: str, namespace: str, table_name: str) -> None:
+def prepare_legacy_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    missing = [column for column in OUTPUT_COLUMNS if column not in df.columns]
+    if missing:
+        raise RuntimeError(f"Missing expected legacy table columns: {missing}")
+
+    legacy = df[OUTPUT_COLUMNS].copy()
+    legacy = legacy.drop_duplicates(subset=["token_mint_address"], keep="last")
+
+    category_lookup = {category.casefold(): category for category in CATEGORIES}
+    raw_categories = legacy["category"].fillna("").astype(str).str.strip()
+    normalized_categories = raw_categories.str.casefold().map(category_lookup)
+    invalid_categories = sorted(set(raw_categories[normalized_categories.isna()]))
+    if invalid_categories:
+        raise RuntimeError(f"Legacy table contains unsupported categories: {invalid_categories}")
+    legacy["category"] = normalized_categories
+
+    timestamps = pd.to_datetime(legacy["updated_at"], errors="coerce", utc=True, format="mixed")
+    if timestamps.isna().any():
+        raise RuntimeError("Legacy table contains invalid updated_at values")
+    legacy["updated_at"] = timestamps.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return legacy
+
+
+def latest_update_time(df: pd.DataFrame) -> datetime:
+    timestamps = pd.to_datetime(df["updated_at"], errors="coerce", utc=True, format="mixed")
+    latest = timestamps.max()
+    if pd.isna(latest):
+        raise RuntimeError("Legacy table does not contain a valid updated_at cutoff")
+    return latest.to_pydatetime()
+
+
+def build_legacy_rebuild_dataset(
+    session: Session,
+    api_key: str,
+    performance: str,
+    *,
+    destination_namespace: str,
+    destination_table_name: str,
+    legacy_namespace: str,
+    legacy_table_name: str,
+) -> pd.DataFrame:
+    legacy_df = execute_sql_to_dataframe(
+        session,
+        api_key,
+        performance,
+        build_legacy_table_sql(legacy_namespace, legacy_table_name),
+        columns=OUTPUT_COLUMNS,
+    )
+    if legacy_df.empty:
+        raise RuntimeError(f"Legacy table {legacy_namespace}.{legacy_table_name} is empty")
+
+    legacy = prepare_legacy_dataset(legacy_df)
+    cutoff = latest_update_time(legacy) - timedelta(hours=48)
+    print(
+        f"Fetched {len(legacy)} legacy rows. "
+        f"Checking source tokens created since {cutoff.isoformat()} with a 48-hour overlap."
+    )
+
+    recent_df = execute_sql_to_dataframe(
+        session,
+        api_key,
+        performance,
+        build_source_sql(
+            incremental=False,
+            namespace=destination_namespace,
+            table_name=destination_table_name,
+            created_after=cutoff,
+        ),
+        columns=SOURCE_COLUMNS,
+    )
+    legacy_mints = set(legacy["token_mint_address"].astype(str))
+    recent_df = recent_df[
+        ~recent_df["token_mint_address"].astype(str).isin(legacy_mints)
+    ].copy()
+    print(f"Fetched {len(recent_df)} tokens not already present in the legacy table")
+
+    if recent_df.empty:
+        return legacy
+
+    unique_names = sorted(recent_df["name"].dropna().astype(str).unique())
+    recent = prepare_final_dataset(recent_df, categorize_names(session, unique_names))
+    combined = pd.concat([legacy, recent], ignore_index=True)
+    return combined.drop_duplicates(subset=["token_mint_address"], keep="last")[OUTPUT_COLUMNS]
+
+
+def create_table_if_needed(
+    session: Session, api_key: str, namespace: str, table_name: str
+) -> bool:
     payload = {
         "namespace": namespace,
         "table_name": table_name,
@@ -356,12 +515,15 @@ def create_table_if_needed(session: Session, api_key: str, namespace: str, table
         json=payload,
     )
     if response.ok:
-        print(f"Table ready: {namespace}.{table_name}")
-        return
+        already_existed = bool(response.json().get("already_existed", False))
+        state = "already exists" if already_existed else "created"
+        print(f"Table {state}: {namespace}.{table_name}")
+        return already_existed
     if response.status_code == 400 and "exist" in response.text.lower():
         print(f"Table already exists: {namespace}.{table_name}")
-        return
+        return True
     raise_for_api_error(response, "Dune table create")
+    return False
 
 
 def list_uploaded_tables(session: Session, api_key: str) -> list[dict[str, Any]]:
@@ -433,25 +595,51 @@ def main() -> None:
     table_name = os.getenv("DUNE_OUTPUT_TABLE", "categorized_prediction_markets")
     performance = os.getenv("DUNE_PERFORMANCE", "medium")
     refresh_mode = os.getenv("DUNE_REFRESH_MODE", "auto").strip().lower()
-    if refresh_mode not in {"auto", "full_rebuild"}:
-        raise ConfigError("DUNE_REFRESH_MODE must be auto or full_rebuild")
-    full_rebuild = refresh_mode == "full_rebuild"
+    if refresh_mode not in {"auto", "legacy_rebuild"}:
+        raise ConfigError("DUNE_REFRESH_MODE must be auto or legacy_rebuild")
+    legacy_rebuild = refresh_mode == "legacy_rebuild"
 
     with requests.Session() as session:
-        exists_before_run = table_exists(session, dune_api_key, namespace, table_name)
-        create_table_if_needed(session, dune_api_key, namespace, table_name)
-        incremental = exists_before_run and not full_rebuild
-        mode = (
-            "full rebuild"
-            if full_rebuild
-            else "incremental last-24-hours append"
-            if incremental
-            else "initial full seed"
-        )
-        print(f"Running in {mode} mode with the {performance} Dune engine.")
+        listed_before_run = table_exists(session, dune_api_key, namespace, table_name)
+        already_existed = create_table_if_needed(session, dune_api_key, namespace, table_name)
+        exists_before_run = listed_before_run or already_existed
+
+        if legacy_rebuild:
+            legacy_namespace = os.getenv("DUNE_LEGACY_NAMESPACE", "ario_57_team").strip()
+            legacy_table_name = os.getenv(
+                "DUNE_LEGACY_TABLE", "categorized_prediction_markets"
+            ).strip()
+            print(
+                "Running in legacy rebuild mode from "
+                f"dune.{legacy_namespace}.{legacy_table_name} with the {performance} Dune engine."
+            )
+            final_df = build_legacy_rebuild_dataset(
+                session,
+                dune_api_key,
+                performance,
+                destination_namespace=namespace,
+                destination_table_name=table_name,
+                legacy_namespace=legacy_namespace,
+                legacy_table_name=legacy_table_name,
+            )
+            print("Category counts:")
+            print(final_df["category"].value_counts().to_string())
+            if exists_before_run:
+                clear_table(session, dune_api_key, namespace, table_name)
+            insert_table(session, dune_api_key, namespace, table_name, final_df)
+            print(f"Legacy rebuild complete: {namespace}.{table_name} ({len(final_df)} rows)")
+            return
+
+        if not exists_before_run:
+            raise ConfigError(
+                "Destination table is new. Run once with DUNE_REFRESH_MODE=legacy_rebuild "
+                "instead of executing a credit-heavy historical source query."
+            )
+
+        print(f"Running in incremental append mode with the {performance} Dune engine.")
 
         source_sql = build_source_sql(
-            incremental=incremental,
+            incremental=True,
             namespace=namespace,
             table_name=table_name,
         )
@@ -474,8 +662,6 @@ def main() -> None:
         print("Category counts:")
         print(final_df["category"].value_counts().to_string())
 
-        if full_rebuild and exists_before_run:
-            clear_table(session, dune_api_key, namespace, table_name)
         insert_table(session, dune_api_key, namespace, table_name, final_df)
         print(f"Refresh complete: {namespace}.{table_name} ({len(final_df)} inserted rows)")
 
